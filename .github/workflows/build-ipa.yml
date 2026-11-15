@@ -1,0 +1,149 @@
+name: Build iOS IPA (iOS 14 jailbreak-ready)
+
+# 大富翁4 重制版 —— 出两个 IPA：
+#   rich4-{v}-unsigned-ios14.ipa  完全未签名（TrollStore / 自行签名用）
+#   rich4-{v}-jb-ios14.ipa        ldid 伪签名（越狱机直装：AppSync Unified / Filza / 轻松签）
+# 针对旧版 ldid 报错 175 的修正：
+#   1) IPHONEOS_DEPLOYMENT_TARGET 覆盖为 14.0（仓库里是 15.0，iOS 14.x 装不上）
+#   2) LD_DYLD_CHAINED_FIXUPS=NO（Xcode 15+ 默认的 chained fixups，老版 ldid 签不动）
+#   3) CI 端用新版 ldid 对主程序和全部内嵌 framework 伪签名
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'game/src/**'
+      - 'game/scripts/**'
+      - 'game/ios/**'
+      - 'game/package.json'
+      - 'game/package-lock.json'
+      - '.github/workflows/build-ipa.yml'
+
+concurrency:
+  group: build-ipa
+  cancel-in-progress: false
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 350
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: game/package-lock.json
+
+      - name: Install build tools (cwebp, ldid)
+        run: brew install webp ldid
+
+      - name: Download game assets from the assets release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: game
+        run: |
+          mkdir -p public
+          gh release download assets --repo iam567/rich4-renew-app --pattern 'rich4-assets.tar*' --clobber
+          shasum -a 256 -c rich4-assets.tar.sha256
+          tar -xf rich4-assets.tar -C public
+          du -sh public/assets
+
+      - name: Install npm dependencies
+        working-directory: game
+        run: npm ci
+
+      - name: Build web app and bundle assets
+        working-directory: game
+        run: |
+          npx tsc --noEmit
+          RICH4_NO_ASSETS=1 npx vite build
+          RICH4_WEBP=1 node scripts/bundle-assets.mjs
+
+      - name: Sync Capacitor iOS project
+        working-directory: game
+        run: npx cap sync ios
+
+      - name: xcodebuild (unsigned, iOS 14, no chained fixups)
+        working-directory: game
+        run: |
+          derived=.cache/jb-build
+          xcodebuild \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$derived" \
+            IPHONEOS_DEPLOYMENT_TARGET=14.0 \
+            LD_DYLD_CHAINED_FIXUPS=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            build -quiet
+          echo "app=$(pwd)/$derived/Build/Products/Release-iphoneos/App.app" >> "$GITHUB_ENV"
+
+      - name: Package unsigned IPA
+        working-directory: game
+        run: |
+          version=$(node -p "require('./package.json').version")
+          stage=$(pwd)/.cache/ipa-unsigned
+          rm -rf "$stage"; mkdir -p "$stage/Payload"
+          cp -R "$app" "$stage/Payload/App.app"
+          mkdir -p release
+          zip -qry "release/rich4-${version}-unsigned-ios14.ipa" Payload
+          echo "unsigned=release/rich4-${version}-unsigned-ios14.ipa" >> "$GITHUB_ENV"
+
+      - name: Pseudo-sign all Mach-O with ldid (jailbreak-ready IPA)
+        working-directory: game
+        run: |
+          version=$(node -p "require('./package.json').version")
+          stage=$(pwd)/.cache/ipa-jb
+          rm -rf "$stage"; mkdir -p "$stage/Payload"
+          cp -R "$app" "$stage/Payload/App.app"
+          cd "$stage/Payload/App.app"
+          links=$(find . -type l)
+          if [ -n "$links" ]; then echo "WARNING: symlinks in bundle:"; echo "$links"; fi
+          find . -type f | while IFS= read -r f; do
+            if file "$f" | grep -q 'Mach-O'; then
+              ldid -S "$f"
+              echo "ldid -S $f"
+            fi
+          done
+          cd ../..
+          zip -qry "$GITHUB_WORKSPACE/game/release/rich4-${version}-jb-ios14.ipa" Payload
+          echo "jb=game/release/rich4-${version}-jb-ios14.ipa" >> "$GITHUB_ENV"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rich4-ipa
+          path: game/release/*.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish to ci-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=ci-latest
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
+              | grep '\.ipa$' \
+              | while IFS= read -r a; do gh release delete-asset "$a" "$tag" --repo "$GITHUB_REPOSITORY" --yes; done
+            gh release upload "$tag" game/release/*.ipa --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" game/release/*.ipa \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --title "CI 构建：iOS 14 越狱可装 IPA（未签名 + ldid 伪签名）" \
+              --notes "自动构建于 commit $GITHUB_SHA。
+          - rich4-*-jb-ios14.ipa：已用 ldid 伪签名。越狱机推荐：先装 AppSync Unified，再用 Filza 打开 IPA 直接安装；或用轻松签/爱思助手重签安装。
+          - rich4-*-unsigned-ios14.ipa：完全未签名，供 TrollStore 或自行签名使用。
+          最低系统：iOS 14.0（仓库原设定 15.0，已为 iOS 14.x 覆盖）。"
+          fi
