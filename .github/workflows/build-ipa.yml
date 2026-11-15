@@ -94,9 +94,10 @@ jobs:
           stage=$(pwd)/.cache/ipa-unsigned
           rm -rf "$stage"; mkdir -p "$stage/Payload"
           cp -R "$app" "$stage/Payload/App.app"
-          mkdir -p release
-          zip -qry "release/rich4-${version}-unsigned-ios14.ipa" Payload
-          echo "unsigned=release/rich4-${version}-unsigned-ios14.ipa" >> "$GITHUB_ENV"
+          cd "$stage"
+          mkdir -p "$GITHUB_WORKSPACE/game/release"
+          zip -qry "$GITHUB_WORKSPACE/game/release/rich4-${version}-unsigned-ios14.ipa" Payload
+          echo "unsigned=$GITHUB_WORKSPACE/game/release/rich4-${version}-unsigned-ios14.ipa" >> "$GITHUB_ENV"
 
       - name: Pseudo-sign all Mach-O with ldid (jailbreak-ready IPA)
         working-directory: game
