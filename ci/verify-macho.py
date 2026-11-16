@@ -28,6 +28,14 @@ LC_VERSION_MIN_IPHONEOS = 0x26
 LC_BUILD_VERSION = 0x32
 LC_MAIN = 0x80000028
 LC_DYLD_CHAINED_FIXUPS = 0x80000034
+LC_LOAD_DYLIB = 0x0C
+LC_LOAD_WEAK_DYLIB = 0x80000018
+
+# dylibs that must NOT be hard-linked (first shipped on iOS in iOS 15.0;
+# a hard load kills the launch on iOS 14.x with "Library not loaded")
+IOS15_ONLY_HARD_PATTERNS = (
+    b"/System/Library/Frameworks/CoreServices.framework/",
+)
 
 MAGIC_THIN_LE = b"\xcf\xfa\xed\xfe"
 MAGIC_THIN_BE = b"\xce\xfa\xed\xfe"
@@ -112,6 +120,13 @@ def analyze(path):
 
         chains = LC_DYLD_CHAINED_FIXUPS in ids
         classic = LC_DYLD_INFO in ids or LC_DYLD_INFO_ONLY in ids
+        hard_dylibs = []
+        for c, raw in cmds:
+            if c == LC_LOAD_DYLIB:
+                off_field = struct.unpack_from(endian + "I", raw, 8)[0]
+                hard_dylibs.append(raw[off_field:].split(b"\x00")[0])
+        bad_hard = [d.decode(errors="replace") for d in hard_dylibs
+                    if any(p in d for p in IOS15_ONLY_HARD_PATTERNS)]
         buildver = None
         for c, raw in cmds:
             if c == LC_BUILD_VERSION and len(raw) >= 24:
@@ -127,6 +142,8 @@ def analyze(path):
             violations.append("LC_DYLD_CHAINED_FIXUPS present (iOS 14 dyld3 aborts at exec)")
         if not classic:
             violations.append("no LC_DYLD_INFO(0x22)/LC_DYLD_INFO_ONLY: binding unusable by iOS 14 dyld3")
+        for name in bad_hard:
+            violations.append(f"hard-links iOS15-only dylib: {name} (kills launch on iOS 14)")
 
         if buildver:
             plat, minos, sdk = buildver
@@ -145,7 +162,7 @@ def analyze(path):
         arch = "arm64" if cputype == CPU_TYPE_ARM64 else f"cputype 0x{cputype:08X}"
         status = "FAIL" if violations else "ok"
         print(f"  [{status}] {abspath} ({arch}) chains={'YES' if chains else 'no'} "
-              f"classic_info={'yes' if classic else 'NO'} buildver={bver} "
+              f"classic_info={'yes' if classic else 'NO'} hard_dylibs={len(hard_dylibs)} buildver={bver} "
               f"codesig={'yes' if signed else 'no'} main={'yes' if has_main else '-'}")
     return violations, warnings
 
