@@ -76,10 +76,11 @@ jobs:
       - name: Force classic dyld binding in the generated Xcode project
         working-directory: game
         run: |
-          cd ios/App
+          cd ios/App/App.xcodeproj
           cp project.pbxproj project.pbxproj.ci-backup
           plutil -convert xml1 project.pbxproj
-          python3 ../../../ci/patch-pbxproj.py project.pbxproj
+          python3 ../../../../ci/patch-pbxproj.py project.pbxproj
+          grep -c 'no_fixup_chains' project.pbxproj
 
       - name: xcodebuild (unsigned, iOS 14, classic binding)
         working-directory: game
