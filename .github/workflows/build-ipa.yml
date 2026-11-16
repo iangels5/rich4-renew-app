@@ -97,6 +97,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$derived" \
             IPHONEOS_DEPLOYMENT_TARGET=14.0 \
+            OTHER_LDFLAGS='$(inherited) -Wl,-no_fixup_chains' \
             LD_DYLD_CHAINED_FIXUPS=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
