@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """CI gate: every Mach-O in an .app must be loadable by the iOS 14 dyld3.
 
-Hard-fails when a binary uses LC_DYLD_CHAINED_FIXUPS (0x80000034, parsed by
-iOS 15+ dyld4; iOS 14.x dyld3 aborts at exec -> app dies before any UI)
-or when classic binding info (LC_DYLD_INFO 0x22 / LC_DYLD_INFO_ONLY
-0x80000022) is missing.
+Hard-fails when a binary hard-links an iOS-15-only dylib (e.g. CoreServices:
+dyld3 "Library not loaded" -> app dies before any UI), or when it has NO
+binding info at all.
+
+NOTE on chained fixups: LC_DYLD_CHAINED_FIXUPS is FINE on iOS 14 — dyld3
+(dyld-750.6) fully parses chained fixups with no OS gate (verified against
+apple-oss-distributions/dyld dyld-750.6 MachOAnalyzer.cpp). Apple's ld emits
+chains by default for minOS >= 13.4, so official prebuilt frameworks
+(capacitor-swift-pm xcframeworks) ship chains-only and remain loadable.
+chains-only / classic-only / both are all acceptable; neither = violation.
 
 Only warns on LC_BUILD_VERSION oddities.
 
@@ -138,10 +144,8 @@ def analyze(path):
 
         if cputype != CPU_TYPE_ARM64:
             warnings.append(f"cputype 0x{cputype:08X} (expected arm64)")
-        if chains:
-            violations.append("LC_DYLD_CHAINED_FIXUPS present (iOS 14 dyld3 aborts at exec)")
-        if not classic:
-            violations.append("no LC_DYLD_INFO(0x22)/LC_DYLD_INFO_ONLY: binding unusable by iOS 14 dyld3")
+        if not chains and not classic:
+            violations.append("no LC_DYLD_CHAINED_FIXUPS and no LC_DYLD_INFO(_ONLY): no binding info, unloadable")
         for name in bad_hard:
             violations.append(f"hard-links iOS15-only dylib: {name} (kills launch on iOS 14)")
 
@@ -197,7 +201,8 @@ def main():
         for v in all_v:
             print(f"  - {v}")
         return 1
-    print(f"PASS [{label}]: every binary uses classic dyld binding, safe for iOS 14.x")
+    print(f"PASS [{label}]: every binary has binding info (classic and/or chained fixups) "
+          f"and hard-links no iOS15-only dylib — safe for iOS 14.x")
     return 0
 
 
