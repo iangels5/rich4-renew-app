@@ -30,12 +30,12 @@ on:
       - 'ci/**'
 
 concurrency:
-  group: build-ipa
+  group: build-ipa-alt
   cancel-in-progress: true
 
 jobs:
   ipa:
-    runs-on: macos-13
+    runs-on: macos-14
     timeout-minutes: 350
     permissions:
       contents: write
