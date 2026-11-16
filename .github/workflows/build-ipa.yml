@@ -7,6 +7,11 @@ name: Build iOS IPA (iOS 14 jailbreak-ready)
 #   1) IPHONEOS_DEPLOYMENT_TARGET 覆盖为 14.0（仓库里是 15.0，iOS 14.x 装不上）
 #   2) LD_DYLD_CHAINED_FIXUPS=NO（Xcode 15+ 默认的 chained fixups，老版 ldid 签不动）
 #   3) CI 端用新版 ldid 对主程序和全部内嵌 framework 伪签名
+# 针对 "iOS 14.3 安装成功但启动无反应" 的修正（run#2 复盘）：
+#   新版 ld 即使 deployment target=14.0 也默认生成 LC_DYLD_CHAINED_FIXUPS（仅 iOS 15+ dyld4 能解析，
+#   iOS 14.x dyld3 exec 即终止 → 图标点了零反应）。LD_DYLD_CHAINED_FIXUPS=NO 在 Xcode 16.4 未生效。
+#   → cap sync 后直接改写 project.pbxproj，给所有 target 注入 -Wl,-no_fixup_chains（保留 $(inherited)）
+#   → 打包前/后各跑一次 ci/verify-macho.py：断言无 chained fixups、有 LC_DYLD_INFO(_ONLY)，不过则构建失败
 
 on:
   workflow_dispatch:
@@ -68,10 +73,21 @@ jobs:
         working-directory: game
         run: npx cap sync ios
 
-      - name: xcodebuild (unsigned, iOS 14, no chained fixups)
+      - name: Force classic dyld binding in the generated Xcode project
+        working-directory: game
+        run: |
+          cd ios/App
+          cp project.pbxproj project.pbxproj.ci-backup
+          plutil -convert xml1 project.pbxproj
+          python3 ../../../ci/patch-pbxproj.py project.pbxproj
+
+      - name: xcodebuild (unsigned, iOS 14, classic binding)
         working-directory: game
         run: |
           derived=.cache/jb-build
+          xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release \
+            -showBuildSettings 2>/dev/null \
+            | grep -iE 'CHAIN|DYLD_INFO|OTHER_LDFLAGS' | sort -u || true
           xcodebuild \
             -project ios/App/App.xcodeproj \
             -scheme App \
@@ -99,6 +115,10 @@ jobs:
           zip -qry "$GITHUB_WORKSPACE/game/release/rich4-${version}-unsigned-ios14.ipa" Payload
           echo "unsigned=$GITHUB_WORKSPACE/game/release/rich4-${version}-unsigned-ios14.ipa" >> "$GITHUB_ENV"
 
+      - name: Verify binding (pre-ldid, diagnostic)
+        working-directory: game
+        run: python3 ../ci/verify-macho.py pre-ldid "$app" || true
+
       - name: Pseudo-sign all Mach-O with ldid (jailbreak-ready IPA)
         working-directory: game
         run: |
@@ -118,6 +138,10 @@ jobs:
           cd ../..
           zip -qry "$GITHUB_WORKSPACE/game/release/rich4-${version}-jb-ios14.ipa" Payload
           echo "jb=game/release/rich4-${version}-jb-ios14.ipa" >> "$GITHUB_ENV"
+
+      - name: Verify binding (post-ldid, must pass)
+        working-directory: game
+        run: python3 ../ci/verify-macho.py post-ldid .cache/ipa-jb/Payload/App.app
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
