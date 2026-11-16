@@ -7,11 +7,14 @@ name: Build iOS IPA (iOS 14 jailbreak-ready)
 #   1) IPHONEOS_DEPLOYMENT_TARGET 覆盖为 14.0（仓库里是 15.0，iOS 14.x 装不上）
 #   2) LD_DYLD_CHAINED_FIXUPS=NO（Xcode 15+ 默认的 chained fixups，老版 ldid 签不动）
 #   3) CI 端用新版 ldid 对主程序和全部内嵌 framework 伪签名
-# 针对 "iOS 14.3 安装成功但启动无反应" 的修正（run#2 复盘）：
-#   新版 ld 即使 deployment target=14.0 也默认生成 LC_DYLD_CHAINED_FIXUPS（仅 iOS 15+ dyld4 能解析，
-#   iOS 14.x dyld3 exec 即终止 → 图标点了零反应）。LD_DYLD_CHAINED_FIXUPS=NO 在 Xcode 16.4 未生效。
-#   → cap sync 后直接改写 project.pbxproj，给所有 target 注入 -Wl,-no_fixup_chains（保留 $(inherited)）
-#   → 打包前/后各跑一次 ci/verify-macho.py：断言无 chained fixups、有 LC_DYLD_INFO(_ONLY)，不过则构建失败
+# 针对 "iOS 14.3 安装成功但启动无反应" 的修正（run#2 复盘 + dyld-750.6 源码实证）：
+#   真因：Capacitor.framework（capacitor-swift-pm 预编译 xcframework）硬链接 CoreServices.framework，
+#   而 CoreServices 在 iOS 上 15.0 才首次出现 → iOS 14.x dyld "Library not loaded" → exec 即死、零 UI。
+#   （chained fixups 并非死因：dyld-750.6 已完整支持 chains；下述 classic 绑定修复保留，无害。）
+#   → weakify-dylibs.py 在签名前把该 LC_LOAD_DYLIB 翻转为 LC_LOAD_WEAK_DYLIB（iOS15+ 照常绑定）
+#   → verify-macho.py 闸门同时断言：无 chains、有 classic 绑定、无硬链 iOS15-only dylib
+#   附带修正：新 ld 在 minOS>=13.4 默认 chains-only；LD_DYLD_CHAINED_FIXUPS=NO 在 Xcode 16.4 不生效，
+#   故 cap sync 后改写 App.xcodeproj 的 pbxproj 注入 -Wl,-no_fixup_chains（保留 $(inherited)）
 
 on:
   workflow_dispatch:
@@ -104,6 +107,10 @@ jobs:
             CODE_SIGN_IDENTITY= \
             build -quiet
           echo "app=$(pwd)/$derived/Build/Products/Release-iphoneos/App.app" >> "$GITHUB_ENV"
+
+      - name: Weak-link iOS15-only dylibs (CoreServices) for iOS 14 launch
+        working-directory: game
+        run: python3 ../ci/weakify-dylibs.py "$app"
 
       - name: Package unsigned IPA
         working-directory: game
